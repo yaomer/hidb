@@ -3,7 +3,7 @@
 #include "alloc.h"
 #include "buf.h"
 
-#define DB_BUF_INIT_SIZE 8
+#define DB_BUF_INIT_SIZE 16
 
 DB_BUF *
 db_buf_init(void)
@@ -25,6 +25,13 @@ db_buf_update(DB_BUF *dbuf, size_t len)
         db_free(dbuf->data);
         dbuf->data = db_malloc(dbuf->max_len);
     }
+}
+
+void
+db_buf_free(DB_BUF *dbuf)
+{
+    db_free(dbuf->data);
+    db_free(dbuf);
 }
 
 DB_STR *

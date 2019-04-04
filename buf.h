@@ -4,7 +4,7 @@
 #include <sys/types.h>
 
 typedef struct redb_buf {
-    void *data;
+    char *data;
     size_t max_len;
 } DB_BUF;
 
@@ -16,6 +16,7 @@ typedef struct redb_str {
 
 DB_BUF *db_buf_init(void);
 void db_buf_update(DB_BUF *dbuf, size_t len);
+void db_buf_free(DB_BUF *dbuf);
 DB_STR *db_str_init(size_t len);
 
 #endif /* _REDB_BUF_H */

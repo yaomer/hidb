@@ -9,61 +9,95 @@
 #include "redb.h"
 #include "alloc.h"
 #include "lock.h"
-#include "hash.h"
 #include "buf.h"
 #include "error.h"
 
+/*
+ * 为DB结构分配内存，并初始化相应字段
+ */
 static DB *
-_db_alloc_db(size_t len)
+_db_init(size_t len)
 {
     DB *db = db_calloc(1, sizeof(DB));
 
-    db->idx_fd = db->dat_fd = -1;
-    db->hash = db_hash_init();
-    /* for [.idx/dat] and ['\0'] */
+    /* 后缀名(4) + \n */
     db->name = db_malloc(len + 4 + 1);
     db->buf = db_buf_init();
+    db->idxfd = db->datfd = -1;
+    db->freeoff = DB_FREE_OFF;
+    db->hashsize = DB_HASH_INIT_SIZE;
+    db->hashnums = 0;
+    db->hashoff = DB_HASH_OFF;
+    db->lock = DB_UNLOCK;
 
     return db;
+}
+
+static void
+_db_free(DB *db)
+{
+    db_free(db->name);
+    db_buf_free(db->buf);
+    db_free(db);
+}
+
+/*
+ * 初始化索引文件，即填充下列字段：
+ * [free list off] [hashsize] [hashnums] [hash list] [\n]
+ */
+static void
+_db_idxf_init(DB *db)
+{
+    char idx[DB_FIELD_SZ * (3 + DB_HASH_INIT_SIZE) + 3];
+    char hlist[DB_FIELD_SZ + 1];
+    size_t len;
+
+    snprintf(idx, sizeof(idx), "%*lld%*zu%*zu",
+            DB_FIELD_SZ, db->freeoff, DB_FIELD_SZ, db->hashsize,
+            DB_FIELD_SZ, db->hashnums);
+    snprintf(hlist, sizeof(hlist), "%*lld", DB_FIELD_SZ, 0LL);
+    for (int i = 0; i < db->hashsize; i++)
+        strcat(idx, hlist);
+    strcat(idx, "\n");
+
+    len = strlen(idx);
+    if (write(db->idxfd, idx, len) != len)
+        db_err_sys("_db_idxf_init: write error");
 }
 
 DB *
 db_open(const char *name)
 {
     size_t len = strlen(name);
-    DB *db = _db_alloc_db(len);
+    DB *db = _db_init(len);
     struct stat statbuf;
-    /* [freeptr] [hashsize] [hashnums] [\n\0] */
-    char idx[DB_FIELD_SZ * 3 + 2];
 
     strcpy(db->name, name);
     strcat(db->name, ".idx");
-
-    db->hash_off = DB_FIELD_SZ * 3;
-
-    if ( (db->idx_fd = open(db->name, DB_OPEN_MODE, DB_FILE_MODE)) < 0)
+    if ( (db->idxfd = open(db->name, DB_OPEN_MODE, DB_FILE_MODE)) < 0)
         db_err_sys("db_open: open error");
     strcpy(db->name + len, ".dat");
-    if ( (db->dat_fd = open(db->name, DB_OPEN_MODE, DB_FILE_MODE)) < 0)
+    if ( (db->datfd = open(db->name, DB_OPEN_MODE, DB_FILE_MODE)) < 0)
         db_err_sys("db_open: open error");
 
-    if (db_writelock(db->idx_fd, 0, SEEK_SET, 0) < 0)
+    if (db->lock && db_writelock(db->idxfd, 0, SEEK_SET, 0) < 0)
         db_err_quit("db_open: db_writelock error");
 
-    if (fstat(db->idx_fd, &statbuf) < 0)
+    if (fstat(db->idxfd, &statbuf) < 0)
         db_err_sys("db_open: fstat error");
 
-    if (statbuf.st_size == 0) {
-        snprintf(idx, sizeof(idx), "%*d%*zu%*zu\n",
-                DB_FIELD_SZ, 0, DB_FIELD_SZ, db->hash->hsize, DB_FIELD_SZ, db->hash->hnums);
-        ssize_t n = strlen(idx);
-        if (write(db->idx_fd, idx, n) != n)
-            db_err_sys("db_open: write error");
-    }
+    if (statbuf.st_size == 0)
+        _db_idxf_init(db);
 
-    if (db_unlock(db->idx_fd, 0, SEEK_SET, 0) < 0)
+    if (db->lock && db_unlock(db->idxfd, 0, SEEK_SET, 0) < 0)
         db_err_quit("db_open: db_unlock error");
     return db;
+}
+
+void
+db_close(DB *db)
+{
+    _db_free(db);
 }
 
 static unsigned
@@ -73,310 +107,174 @@ _db_hash(DB *db, const char *key)
 
     for (hval = 0; *key != '\0'; key++)
         hval = *key + 31 * hval;
-    return hval % db->hash->hsize;
+    return hval % db->hashsize;
+}
+
+/*
+ * 读取一条索引记录，并填充
+ * [db->nrecoff] [db->idxlen] [db->datoff] [db->datlen]
+ */
+static void
+_db_read_idx(DB *db)
+{
+    struct iovec iov[2];
+    char nrecoff[DB_FIELD_SZ + 1];
+    char idxlen[DB_FIELD_SZ + 1];
+    char *datoff, *datlen;
+
+    if (lseek(db->idxfd, db->nrecoff, SEEK_SET) < 0)
+        db_err_sys("_db_read_idx: lseek error");
+
+    iov[0].iov_base = nrecoff;
+    iov[0].iov_len = DB_FIELD_SZ;
+    iov[1].iov_base = idxlen;
+    iov[1].iov_len = DB_FIELD_SZ;
+
+    if (readv(db->idxfd, iov, 2) < 0)
+        db_err_sys("_db_read_idx: readv error");
+
+    db->idxlen = atol(idxlen);
+
+    if (lseek(db->idxfd, db->nrecoff + DB_FIELD_SZ * 2 + 1, SEEK_SET) < 0)
+        db_err_sys("_db_read_idx: lseek error");
+
+    db->nrecoff = atol(nrecoff);
+
+    db_buf_update(db->buf, db->idxlen);
+    if (read(db->idxfd, db->buf->data, db->idxlen) < 0)
+        db_err_sys("_db_read_idx: read error");
+
+    if (!(datoff = strchr(db->buf->data, DB_SEP)))
+        db_err_quit("_db_read_idx: missing separater [key:datoff]");
+    *datoff++ = '\0';
+    if (!(datlen = strchr(datoff, DB_SEP)))
+        db_err_quit("_db_read_idx: missing separater [datoff:datlen]");
+    *datlen++ = '\0';
+
+    db->datoff = atol(datoff);
+    db->datlen = atol(datlen);
 }
 
 static int
-_db_find_lock(DB *db, const char *key, int writelock)
+_db_find(DB *db, const char *key)
 {
-    off_t offset, nextoff;
+    int rc = -1;
+    char nrecoff[DB_FIELD_SZ + 1];
 
-    db->chain_off = (_db_hash(db, key) * DB_FIELD_SZ) + db->hash_off;
-    db->nrec_ptr = db->chain_off;
+    /* key所在的散列链头 */
+    db->chainoff = db->hashoff + (_db_hash(db, key) * DB_FIELD_SZ);
 
-    if (writelock) {
-        if (db_writelock(db->idx_fd, db->chain_off, SEEK_SET, 1) < 0)
-            db_err_quit("_db_find_lock: db_writelock error");
-    } else {
-        if (db_readlock(db->idx_fd, db->chain_off, SEEK_SET, 1) < 0)
-            db_err_quit("_db_find_lock: db_readlock error");
-    }
+    if (lseek(db->idxfd, db->chainoff, SEEK_SET) < 0)
+        db_err_sys("_db_find: lseek error");
+    if (read(db->idxfd, nrecoff, DB_FIELD_SZ) < 0)
+        db_err_sys("_db_find: read error");
 
-    offset = _db_read_ptr(db, db->nrec_ptr);
-    while (offset) {
-        nextoff = _db_read_idx(db, offset);
-        if (strcmp(db->buf, key) == 0)
+    /* 搜寻整个散列链，查找匹配的key */
+    db->nrecoff = atol(nrecoff);
+    while (db->nrecoff) {
+        _db_read_idx(db);
+        if (strcmp(db->buf->data, key) == 0) {
+            rc = 0;
             break;
-        db->nrec_ptr = offset;
-        offset = nextoff;
+        }
     }
 
-    return offset ? 1 : -1;
-}
-
-/*
- * read [freeptr] [hashsize] [hashnums] [hash list head]
- */
-static off_t
-_db_read_ptr(DB *db, off_t offset)
-{
-    char off[DB_FIELD_SZ + 1];
-
-    if (lseek(db->idx_fd, offset, SEEK_SET) < 0)
-        db_err_sys("_db_read_ptr: lseek error");
-    if (read(db->idx_fd, off, DB_FIELD_SZ) != DB_FIELD_SZ)
-        db_err_sys("_db_read_ptr: read error");
-
-    return atol(off);
-}
-
-/*
- * 读取一条索引记录，并返回指向下一条索引记录的指针
- */
-static off_t
-_db_read_idx(DB *db, off_t offset)
-{
-    char nrec_ptr[DB_FIELD_SZ + 1];
-    char idx_len[DB_FIELD_SZ + 1];
-    struct iovec iov[2];
-    char *ptr1, *ptr2;
-
-    if (lseek(db->idx_fd, offset, SEEK_SET) < 0)
-        db_err_sys("_db_read_idx: lseek error");
-
-    iov[0].iov_base = nrec_ptr;
-    iov[0].iov_len = DB_FIELD_SZ;
-    iov[1].iov_base = idx_len;
-    iov[1].iov_len = DB_FIELD_SZ;
-
-    /* read [nrec_ptr] and [idxlen] */
-    if (readv(db->idx_fd, iov, 2) != DB_FIELD_SZ * 2)
-        db_err_sys("_db_read_idx: readv error");
-
-    db->nrec_ptr = atol(nrec_ptr);
-    db->idx_len = atol(idx_len);
-
-    db_buf_update(db->buf, db->idx_len);
-    /* read idx record */
-    if (read(db->idx_fd, db->buf->data, db->idx_len) != db->idx_len)
-        db_err_sys("_db_read_idx: read error");
-    db->buf[db->idx_len] = '\0';
-
-    /* db->buf->data: [key\0datoff\0datlen\0] */
-    if ((ptr1 = strchr(db->buf->data, SEP)) == NULL)
-        db_err_quit("_db_read_idx: missing sep [key:datoff]");
-    *ptr1++ = '\0';   /* point to datoff */
-    if ((ptr2 = strchr(db->buf->data, SEP)) == NULL)
-        db_err_quit("_db_read_idx: missing sep [datoff:datlen]");
-    *ptr2++ = '\0';  /* point to datlen */
-
-    db->dat_off = atol(ptr1);
-    db->dat_len = atol(ptr2);
-
-    return nrec_ptr;
-}
-
-static DB_STR *
-_db_read_dat(DB *db)
-{
-    DB_STR *dstr = db_str_init(db->dat_len);
-
-    if (lseek(db->dat_fd, db->dat_off, SEEK_SET) < 0)
-        db_err_sys("_db_read_dat: lseek error");
-    if (read(db->dat_fd, dstr->str, dstr->len) != dstr->len)
-        db_err_sys("_db_read_dat: read error");
-
-    return dstr;
-}
-
-DB_STR *
-db_fetch(DB *db, const char *key)
-{
-    DB_STR *dstr;
-
-    if (_db_find_lock(db, key, 0) > 0)
-        dstr = _db_read_dat(db);
-    else
-        dstr = NULL;
-
-    if (db_unlock(db->idx_fd, db->chain_off, SEEK_SET, 1) < 0)
-        db_err_quit("db_fetch: db_unlock error");
-    return dstr;
-}
-
-static void
-_db_do_delete(DB *db)
-{
-
-}
-
-int
-db_delete(DB *db, const char *key)
-{
-    int rc;
-
-    if (_db_find_lock(db, key, 1) > 0) {
-        _db_do_delete(db);
-        rc = 0;
-    } else
-        rc = -1;
-
-    if (db_unlock(db->idx_fd, db->chain_off, SEEK_SET, 1) < 0)
-        db_err_quit("db_delete: db_unlock error");
     return rc;
 }
 
 static void
-_db_write_ptr(DB *db, off_t offset, off_t nrec_ptr)
+_db_write_idx(DB *db, const char *key, off_t offset, off_t whence)
 {
-    char ptr[DB_FIELD_SZ + 1];
-
-    snprintf(ptr, sizeof(ptr), "%*zu", DB_FIELD_SZ, nrec_ptr);
-    if (lseek(db->idx_fd, offset, SEEK_SET) < 0)
-        db_err_sys("_db_write_ptr: lseek error");
-    if (write(db->idx_fd, ptr, DB_FIELD_SZ) != DB_FIELD_SZ)
-        db_err_sys("_db_write_ptr: write error");
-}
-
-static void
-_db_write_idx(DB *db, const char *key,
-        off_t offset, off_t whence, off_t nrec_ptr)
-{
-    size_t len = strlen(key);
-    size_t idxlen;
-    char ptr[DB_FIELD_SZ * 2 + 1];
+    char idx[DB_FIELD_SZ * 2 + 1];
+    char off[DB_FIELD_SZ + 1];
     struct iovec iov[2];
+    size_t len = strlen(key);
 
-    if (whence == SEEK_END) {
-        if (db_writelock(db->idx_fd,
-                        ((db->hash->hsize + 3) * DB_FIELD_SZ) + 1,
-                        SEEK_SET, 0) < 0)
-            db_err_quit("_db_write_idx: db_writelock error");
-    }
+    db->chainoff = db->hashoff + (_db_hash(db, key) * DB_FIELD_SZ);
 
-    db_buf_update(db->buf, DB_FIELD_SZ * 2 + len + 2 + 2);
-    snprintf(db->buf->data, sizeof(db->buf->data),
-            "%s%c%*zu%c%*zu", key, SEP,
-            DB_FIELD_SZ, db->dat_off, SEP, DB_FIELD_SZ, db->dat_len);
-    idxlen = strlen(db->buf->data);
-    snprintf(ptr, sizeof(ptr), "%*zu%*zu",
-            DB_FIELD_SZ, nrec_ptr, DB_FIELD_SZ, idxlen);
-    len = strlen(ptr);
+    if (lseek(db->idxfd, db->chainoff, SEEK_SET) < 0)
+        db_err_sys("_db_write_idx: lseek error");
 
-    iov[0].iov_base = ptr;
+    if (read(db->idxfd, off, DB_FIELD_SZ) < 0)
+        db_err_sys("_db_write_idx: read error");
+    db->nrecoff = atol(off);
+
+    if ((db->idxoff = lseek(db->idxfd, offset, whence)) < 0)
+        db_err_sys("_db_write_idx: lseek error");
+
+    db_buf_update(db->buf, len + DB_FIELD_SZ * 3 + 4);
+    snprintf(db->buf->data, db->buf->max_len, "%c%s%c%lld%c%zu\n",
+            DB_SEP, key, DB_SEP, db->datoff, DB_SEP, db->datlen);
+    db->idxlen = strlen(db->buf->data);
+
+    snprintf(idx, sizeof(idx), "%*lld%*zu",
+            DB_FIELD_SZ, db->nrecoff, DB_FIELD_SZ, db->idxlen);
+    len = strlen(idx);
+
+    iov[0].iov_base = idx;
     iov[0].iov_len = len;
     iov[1].iov_base = db->buf->data;
-    iov[1].iov_len = idxlen;
+    iov[1].iov_len = db->idxlen;
 
-    if (writev(db->idx_fd, iov, 2) != len + idxlen)
+    if (writev(db->idxfd, iov, 2) != len + db->idxlen)
         db_err_sys("_db_write_idx: writev error");
 
-    if (whence == SEEK_END) {
-        if (db_unlock(db->idx_fd,
-                     ((db->hash->hsize + 3) * DB_FIELD_SZ) + 1,
-                     SEEK_SET, 0) < 0)
-            db_err_quit("_db_write_idx: db_unlock error");
-    }
+    if (lseek(db->idxfd, db->chainoff, SEEK_SET) < 0)
+        db_err_sys("_db_write_idx: lseek error");
+
+    snprintf(off, sizeof(off), "%*lld", DB_FIELD_SZ, db->idxoff);
+    if (write(db->idxfd, off, DB_FIELD_SZ) != DB_FIELD_SZ)
+        db_err_sys("_db_write_idx: write error");
+
+    if (lseek(db->idxfd, DB_FIELD_SZ * 2, SEEK_SET) < 0)
+        db_err_sys("_db_write_idx: lseek error");
+
+    snprintf(off, sizeof(off), "%*zu", DB_FIELD_SZ, db->hashnums);
+    if (write(db->idxfd, off, DB_FIELD_SZ) != DB_FIELD_SZ)
+        db_err_sys("_db_write_idx: write error");
 }
 
 static void
 _db_write_dat(DB *db, void *data, size_t len,
         off_t offset, off_t whence)
 {
-    struct iovec iov[2];
     static char newline = '\n';
+    struct iovec iov[2];
 
-    if (whence == SEEK_END) {
-        if (db_writelock(db->dat_fd, 0, SEEK_SET, 0) < 0)
-            db_err_quit("_db_write_dat: db_writelock error");
-    }
-
-    if ((db->dat_off = lseek(db->dat_fd, offset, whence)) < 0)
-        db_err_sys("_db_write_dat: lseek error");
-    db->dat_len = len;
+    db->datlen = len;
+    if ((db->datoff = lseek(db->datfd, offset, whence)) < 0)
+        db_err_sys("db_insert: lseek error");
 
     iov[0].iov_base = data;
     iov[0].iov_len = len;
     iov[1].iov_base = &newline;
     iov[1].iov_len = 1;
 
-    if (writev(db->dat_fd, iov, 2) != db->dat_len + 1)
-        db_err_sys("_db_write_dat: writev error");
-
-    if (whence == SEEK_END) {
-        if (db_unlock(db->dat_fd, 0, SEEK_SET, 0) < 0)
-            db_err_quit("_db_write_dat: db_unlock error");
-    }
+    if (writev(db->datfd, iov, 2) < 0)
+        db_err_sys("db_insert: writev error");
+    db->hashnums++;
 }
 
-static int
-_db_find_free_lock(DB *db, size_t keylen, size_t datlen)
+void
+db_insert(DB *db, const char *key, void *data, size_t len)
 {
-    off_t offset, nextoff, saveoff;
-    int rc = 0;
-
-    if (db_writelock(db->idx_fd, DB_FREE_OFF, SEEK_SET, 1) < 0)
-        db_err_quit("_db_find_free_lock: db_writelock error");
-
-    saveoff = DB_FREE_OFF;
-    offset = _db_read_ptr(db, saveoff);
-    while (offset) {
-        nextoff = _db_read_idx(db, offset);
-        if (strlen(db->buf->data) == keylen && db->dat_len == datlen)
-            break;
-        saveoff = offset;
-        offset = nextoff;
-    }
-
-    if (offset == 0)
-        rc = -1;
-    else {
-        _db_write_ptr(db, saveoff, db->nrec_ptr);
-        rc = 0;
-    }
-
-    if (db_unlock(db->idx_fd, DB_FREE_OFF, SEEK_SET, 1) < 0)
-        db_err_quit("_db_find_free_lock: db_unlock error");
-    return rc;
-}
-
-int
-db_store(DB *db, const char *key, void *data,
-        size_t datlen, int flag)
-{
-    int rc;
-    size_t keylen = strlen(key);
-    off_t nrec_ptr;
-
-    switch (flag) {
-    case DB_INSERT:
-        if (_db_find_lock(db, key, 1) > 0) {
-            rc = -1;
-            goto ret;
-        }
-
-        nrec_ptr = _db_read_ptr(db, db->chain_off);
-
-        if (_db_find_free_lock(db, keylen, datlen) < 0) {
-            _db_write_dat(db, data, datlen, 0, SEEK_END);
-            _db_write_idx(db, key, 0, SEEK_END, nrec_ptr);
-        } else {
-            _db_write_dat(db, data, datlen, db->dat_off, SEEK_SET);
-            _db_write_idx(db, key, db->idx_off, SEEK_SET, nrec_ptr);
-            _db_write_ptr(db, db->chain_off, db->idx_off);
-        }
-        break;
-    case DB_REPLACE:
-        if (_db_find_lock(db, key, 1) < 0) {
-            rc = -1;
-            goto ret;
-        }
-        break;
-    case DB_STORE:
-        break;
-    default:
-        break;
-    }
-
-ret:
-    if (db_unlock(db->idx_fd, db->chain_off, SEEK_SET, 1) < 0)
-        db_err_quit("db_store: db_unlock error");
-    return rc;
+    if (_db_find(db, key) == 0)
+        return;
+    _db_write_dat(db, data, len, 0, SEEK_END);
+    _db_write_idx(db, key, 0, SEEK_END);
 }
 
 int
 main(void)
 {
-    DB *db = db_open("hello");
+    char key[20];
+    char data[20];
 
+    DB *d = db_open("hello");
+    for (int i = 0; i < 30000; i++) {
+        sprintf(key, "%s%d", "jfd", i);
+        sprintf(data, "%s%d", "foeito", i);
+        db_insert(d, key, data, strlen(data));
+    }
+    db_close(d);
 }
