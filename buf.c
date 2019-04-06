@@ -39,7 +39,7 @@ db_str_init(size_t len)
 {
     DB_STR *dstr = db_malloc(sizeof(DB_STR));
 
-    dstr->str = db_malloc(len);
+    dstr->str = db_malloc(len + 1);
     dstr->len = len;
 
     return dstr;

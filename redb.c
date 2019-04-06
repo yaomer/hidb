@@ -65,6 +65,15 @@ _db_idxf_init(DB *db)
         db_err_sys("_db_idxf_init: write error");
 }
 
+/*
+ * 读取索引文件内容并以之初始化DB
+ */
+static void
+_db_read_idxf_init(DB *db)
+{
+
+}
+
 DB *
 db_open(const char *name)
 {
@@ -88,6 +97,8 @@ db_open(const char *name)
 
     if (statbuf.st_size == 0)
         _db_idxf_init(db);
+    else
+        _db_read_idxf_init(db);
 
     if (db->lock && db_unlock(db->idxfd, 0, SEEK_SET, 0) < 0)
         db_err_quit("db_open: db_unlock error");
@@ -182,6 +193,32 @@ _db_find(DB *db, const char *key)
     return rc;
 }
 
+static DB_STR *
+_db_read_dat(DB *db)
+{
+    DB_STR *dstr = db_str_init(db->datlen);
+
+    if (lseek(db->datfd, db->datoff, SEEK_SET) < 0)
+        db_err_sys("_db_read_dat: lseek error");
+
+    if (read(db->datfd, dstr->str, dstr->len) < 0)
+        db_err_sys("_db_read_dat: read error");
+
+    return dstr;
+}
+
+DB_STR *
+db_fetch(DB *db, const char *key)
+{
+    DB_STR *dstr;
+
+    if (_db_find(db, key) < 0)
+        return NULL;
+    dstr = _db_read_dat(db);
+
+    return dstr;
+}
+
 static void
 _db_write_idx(DB *db, const char *key, off_t offset, off_t whence)
 {
@@ -270,11 +307,20 @@ main(void)
     char key[20];
     char data[20];
 
-    DB *d = db_open("hello");
+    /* DB *d = db_open("hello");
     for (int i = 0; i < 30000; i++) {
         sprintf(key, "%s%d", "jfd", i);
         sprintf(data, "%s%d", "foeito", i);
         db_insert(d, key, data, strlen(data));
     }
+
+    for (int i = 0; i < 30000; i++) {
+        sprintf(key, "%s%d", "jfd", i);
+        DB_STR *s = db_fetch(d, key);
+
+        if (s)
+            printf("%s\n", s->str);
+    } */
+
     db_close(d);
 }
