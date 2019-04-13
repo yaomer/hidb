@@ -19,8 +19,8 @@ db_buf_init(void)
 void
 db_buf_update(DB_BUF *dbuf, size_t len)
 {
-    if (len > dbuf->max_len) {
-        while (len > dbuf->max_len)
+    if (len + 1 > dbuf->max_len) {
+        while (len + 1 > dbuf->max_len)
             dbuf->max_len *= 2;
         db_free(dbuf->data);
         dbuf->data = db_malloc(dbuf->max_len);

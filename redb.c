@@ -24,11 +24,10 @@ _db_init(size_t len)
     db->name = db_malloc(len + 4 + 1);
     db->buf = db_buf_init();
     db->idxfd = db->datfd = -1;
-    db->freeoff = DB_FREE_OFF;
     db->hashsize = DB_HASH_INIT_SIZE;
     db->hashnums = 0;
-    db->hashoff = DB_HASH_OFF;
     db->lock = DB_UNLOCK;
+    db->freeoff = 0;
 
     return db;
 }
@@ -53,7 +52,7 @@ _db_idxf_init(DB *db)
     size_t len;
 
     snprintf(idx, sizeof(idx), "%*lld%*zu%*zu",
-            DB_FIELD_SZ, db->freeoff, DB_FIELD_SZ, db->hashsize,
+            DB_FIELD_SZ, DB_FREE_OFF, DB_FIELD_SZ, db->hashsize,
             DB_FIELD_SZ, db->hashnums);
     snprintf(hlist, sizeof(hlist), "%*lld", DB_FIELD_SZ, 0LL);
     for (int i = 0; i < db->hashsize; i++)
@@ -71,7 +70,19 @@ _db_idxf_init(DB *db)
 static void
 _db_read_idxf_init(DB *db)
 {
+    char idx[DB_FIELD_SZ + 1];
+    size_t len = DB_HASH_OFF;
 
+    if (lseek(db->idxfd, DB_HASHSIZE_OFF, SEEK_SET) < 0)
+        db_err_sys("_db_read_idxf_init: lseek error");
+    db_buf_update(db->buf, len);
+    if (read(db->idxfd, db->buf->data, len) < 0)
+        db_err_sys("_db_read_idxf_init: read error");
+
+    memcpy(idx, db->buf->data, DB_FIELD_SZ);
+    db->hashsize = atol(idx);
+    memcpy(idx, db->buf->data + DB_FIELD_SZ, DB_FIELD_SZ);
+    db->hashnums = atol(idx);
 }
 
 DB *
@@ -173,7 +184,7 @@ _db_find(DB *db, const char *key)
     char nrecoff[DB_FIELD_SZ + 1];
 
     /* key所在的散列链头 */
-    db->chainoff = db->hashoff + (_db_hash(db, key) * DB_FIELD_SZ);
+    db->chainoff = DB_HASH_OFF + (_db_hash(db, key) * DB_FIELD_SZ);
 
     if (lseek(db->idxfd, db->chainoff, SEEK_SET) < 0)
         db_err_sys("_db_find: lseek error");
@@ -227,7 +238,7 @@ _db_write_idx(DB *db, const char *key, off_t offset, off_t whence)
     struct iovec iov[2];
     size_t len = strlen(key);
 
-    db->chainoff = db->hashoff + (_db_hash(db, key) * DB_FIELD_SZ);
+    db->chainoff = DB_HASH_OFF + (_db_hash(db, key) * DB_FIELD_SZ);
 
     if (lseek(db->idxfd, db->chainoff, SEEK_SET) < 0)
         db_err_sys("_db_write_idx: lseek error");
@@ -293,12 +304,45 @@ _db_write_dat(DB *db, void *data, size_t len,
 }
 
 void
-db_insert(DB *db, const char *key, void *data, size_t len)
+db_store(DB *db, const char *key, void *data, size_t len)
 {
     if (_db_find(db, key) == 0)
         return;
     _db_write_dat(db, data, len, 0, SEEK_END);
     _db_write_idx(db, key, 0, SEEK_END);
+}
+
+static int
+_db_find_freelist(DB *db, const char *key)
+{
+    int rc = -1;
+
+    if (lseek(db->idxfd, DB_FREE_OFF, SEEK_SET) < 0)
+        db_err_sys("_db_find_freelist: lseek error");
+    db_buf_update(db->buf, DB_FIELD_SZ);
+    if (read(db->idxfd, db->buf->data, DB_FIELD_SZ) < 0)
+        db_err_sys("_db_find_freelist: read error");
+
+    db->nrecoff = atol(db->buf->data);
+    while (db->nrecoff) {
+        _db_read_idx(db);
+        if (strcmp(db->buf->data, key) == 0) {
+            rc = 0;
+            break;
+        }
+    }
+
+    return rc;
+}
+
+void
+db_delete(DB *db, const char *key)
+{
+    if (_db_find_freelist(db, key) < 0) {
+
+    } else {
+
+    }
 }
 
 int
@@ -307,14 +351,14 @@ main(void)
     char key[20];
     char data[20];
 
-    /* DB *d = db_open("hello");
-    for (int i = 0; i < 30000; i++) {
+    DB *d = db_open("hello");
+    for (int i = 0; i < 20000; i++) {
         sprintf(key, "%s%d", "jfd", i);
         sprintf(data, "%s%d", "foeito", i);
-        db_insert(d, key, data, strlen(data));
+        db_store(d, key, data, strlen(data));
     }
 
-    for (int i = 0; i < 30000; i++) {
+    /* for (int i = 0; i < 30000; i++) {
         sprintf(key, "%s%d", "jfd", i);
         DB_STR *s = db_fetch(d, key);
 
