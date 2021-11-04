@@ -1,5 +1,5 @@
-#ifndef _REDB_LOG_H
-#define _REDB_LOG_H
+#ifndef _HIDB_LOG_H
+#define _HIDB_LOG_H
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -8,8 +8,8 @@
 
 typedef long long segno_t;
 
-struct redb;
-typedef struct redb DB;
+struct __db;
+typedef struct __db DB;
 struct value;
 
 enum log_op_type {
@@ -64,4 +64,4 @@ void    log_dealloc(log_t *log);
 void    log_append(log_t *log, struct value *value, int sync, int type, struct kvpair *p);
 void    load_value(sds_t *query, struct value *value);
 
-#endif // _REDB_LOG_H
+#endif /* _HIDB_LOG_H */

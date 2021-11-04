@@ -1,5 +1,5 @@
-#ifndef _REDB_H
-#define _REDB_H
+#ifndef _HIDB_H
+#define _HIDB_H
 
 #include "sds.h"
 
@@ -8,7 +8,7 @@ typedef struct __concurrency_hash concurrency_hash_t;
 struct __log;
 typedef struct __log log_t;
 
-typedef struct redb {
+typedef struct __db {
     char    *name;  /* db dir name */
     log_t   *log;   /* log module */
     sds_t   *query; /* Saves the results of user queries */
@@ -22,4 +22,4 @@ void    db_insert(DB *db, int sync, const char *key, size_t keylen, const char *
 void    db_delete(DB *db, int sync, const char *key, size_t keylen);
 void    db_close(DB *db);
 
-#endif /* _REDB_H */
+#endif /* _HIDB_H */

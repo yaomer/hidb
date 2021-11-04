@@ -1,5 +1,5 @@
-#ifndef _REDB_HASH_H
-#define _REDB_HASH_H
+#ifndef _HIDB_HASH_H
+#define _HIDB_HASH_H
 
 #include "sds.h"
 
@@ -33,4 +33,4 @@ void    hash_erase(hash_t *hs, const char *key, size_t keylen);
 void    hash_for_each(hash_t *hs, void (*deal)(void *arg, sds_t *key, struct value *value), void *arg);
 void    hash_free(hash_t *hs);
 
-#endif // _REDB_HASH_H
+#endif /* _HIDB_HASH_H */

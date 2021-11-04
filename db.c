@@ -1,4 +1,4 @@
-#include "redb.h"
+#include "db.h"
 #include "alloc.h"
 #include "log.h"
 #include "sds.h"

@@ -1,5 +1,5 @@
-#ifndef _REDB_ALLOC_H
-#define _REDB_ALLOC_H
+#ifndef _HIDB_ALLOC_H
+#define _HIDB_ALLOC_H
 
 #include <stddef.h>
 
@@ -10,4 +10,4 @@ void     db_free(void *ptr);
 
 size_t  db_memory_used(void);
 
-#endif /* _REDB_ALLOC_H */
+#endif /* _HIDB_ALLOC_H */

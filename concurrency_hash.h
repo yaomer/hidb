@@ -1,5 +1,5 @@
-#ifndef _REDB_CONCURRENCY_HASH_H
-#define _REDB_CONCURRENCY_HASH_H
+#ifndef _HIDB_CONCURRENCY_HASH_H
+#define _HIDB_CONCURRENCY_HASH_H
 
 #include <pthread.h>
 
@@ -23,4 +23,4 @@ void    concurrency_hash_insert(concurrency_hash_t *hs, const char *key, size_t 
 void    concurrency_hash_erase(concurrency_hash_t *hs, const char *key, size_t keylen);
 void    concurrency_hash_free(concurrency_hash_t *hs);
 
-#endif /* _REDB_CONCURRENCY_HASH_H */
+#endif /* _HIDB_CONCURRENCY_HASH_H */

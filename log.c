@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 
 #include "alloc.h"
-#include "redb.h"
+#include "db.h"
 #include "log.h"
 #include "concurrency_hash.h"
 #include "error.h"

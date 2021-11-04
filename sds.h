@@ -1,5 +1,5 @@
-#ifndef _REDB_SDS_H
-#define _REDB_SDS_H
+#ifndef _HIDB_SDS_H
+#define _HIDB_SDS_H
 
 #include <sys/types.h>
 
@@ -29,4 +29,4 @@ size_t      sds_hash(sds_t *s);
 
 char *concat(const char *s1, const char *s2);
 
-#endif /* _REDB_SDS_H */
+#endif /* _HIDB_SDS_H */
