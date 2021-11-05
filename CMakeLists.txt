@@ -4,7 +4,17 @@ project (hidb)
 
 set (CMAKE_C_FLAGS "-std=c11 -Wall -O2")
 
+include (CheckSymbolExists)
+
+CHECK_SYMBOL_EXISTS(fdatasync "unistd.h" HAVE_FDATASYNC)
+CHECK_SYMBOL_EXISTS(F_FULLFSYNC "fcntl.h" HAVE_FULLFSYNC)
+
 set (SRC "${PROJECT_SOURCE_DIR}/src")
+
+configure_file (
+    "${SRC}/config.h.in"
+    "${SRC}/config.h"
+)
 
 set (DB
     ${SRC}/alloc.c

@@ -13,6 +13,7 @@
 #include "db.h"
 #include "log.h"
 #include "concurrency_hash.h"
+#include "sync.h"
 #include "error.h"
 
 static const off_t max_segfile_size = 1024 * 1024 * 16;
@@ -338,8 +339,8 @@ void log_dealloc(log_t *log)
 void log_append(log_t *log, struct value *value, int sync, int type, struct kvpair *p)
 {
     log->lsn += format_and_write(log->append_fd, type, p);
-    if (sync && fsync(log->append_fd) < 0) {
-        db_err_sys("fsync(segno = %lld)", log->cur->segno);
+    if (sync && sync_fd(log->append_fd)) {
+        db_err_sys("sync_fd(segno = %lld)", log->cur->segno);
     }
     if (value) {
         value->seg = log->cur;

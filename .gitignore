@@ -5,3 +5,4 @@ xdb
 tmp
 build
 test
+config.h
