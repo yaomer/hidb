@@ -23,6 +23,7 @@ set (DB
     ${SRC}/concurrency_hash.c
     ${SRC}/db.c
     ${SRC}/log.c
+    ${SRC}/sync.c
     ${SRC}/error.c
 )
 
