@@ -6,6 +6,7 @@
 struct sds {
     char *buf;
     size_t len;
+    size_t avail;
 };
 
 typedef struct sds sds_t;
@@ -17,16 +18,24 @@ void   sds_init(sds_t *s);
 void   sds_clear(sds_t *s);
 
 void   sds_resize(sds_t *s, size_t size);
-sds_t *sds_dup(const char *s);
-sds_t *sds_dup2(const char *s, size_t len);
-sds_t *sds_dup3(sds_t *s);
-void   sds_append(sds_t *sds, const char *s);
-void   sds_append2(sds_t *sds, const char *s, size_t len);
+void   sds_reserve(sds_t *s, size_t size);
+void   sds_append(sds_t *sds, const char *s, size_t len);
 int    sds_cmp(sds_t *s1, sds_t *s2);
 
 const char *sds2str(sds_t *s);
-size_t      sds_hash(sds_t *s);
 
-char *concat(const char *s1, const char *s2);
+size_t  strhash(const char *s, size_t len);
+
+/* Convenient to pass */
+struct slice {
+    char   *buf;
+    size_t  len;
+};
+
+#define slice_init(__s, __p, __l) \
+    do { \
+        (__s).buf = (char*)(__p); \
+        (__s).len = (__l); \
+    } while (0)
 
 #endif /* _HIDB_SDS_H */

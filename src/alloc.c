@@ -58,6 +58,14 @@ void *db_realloc(void *ptr, size_t size)
     return memory_used_add(new_ptr, size);
 }
 
+char *db_strdup(const char *s)
+{
+    size_t len = strlen(s);
+    char *buf = db_malloc(len + 1);
+    strcpy(buf, s);
+    return buf;
+}
+
 void db_free(void *ptr)
 {
     if (ptr == NULL) return;

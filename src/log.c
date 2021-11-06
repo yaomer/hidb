@@ -3,20 +3,16 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/uio.h>
 #include <assert.h>
 #include <sys/mman.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
 #include "alloc.h"
-#include "db.h"
-#include "log.h"
-#include "concurrency_hash.h"
-#include "sync.h"
+#include "db_impl.h"
 #include "error.h"
 
-static const off_t max_segfile_size = 1024 * 1024 * 16;
+static const off_t max_segfile_size = 1024 * 1024 * 64;
 
 static const int compact_segfile_nums = 4;
 
@@ -41,13 +37,14 @@ static void add_new_segment(log_t *log, segno_t segno)
     seg->segno = segno;
 
     char *segfile = get_segfile(log, segno);
-    if (log->append_fd > 0) close(log->append_fd);
-    log->append_fd = open(segfile, O_RDWR | O_APPEND | O_CREAT, 0644);
-    if (log->append_fd < 0) db_err_sys("open(%s)", segfile);
+    if (log->curfile) writable_file_close(log->curfile);
+    log->curfile = new_writable_file(segfile);
 
-    log->lsn = get_file_size(log->append_fd);
+    log->lsn = get_file_size(log->curfile->fd);
     seg->fd = open(segfile, O_RDONLY);
-    if (seg->fd < 0) db_err_sys("open(%s)", segfile);
+    if (seg->fd < 0) {
+        db_error("open(%s): %s", segfile, strerror(errno));
+    }
     db_free(segfile);
 
     /* Add seg to the list */
@@ -116,7 +113,7 @@ static void build_segment_list(log_t *log)
 }
 
 /* Return parsed bytes and update *ptr */
-static off_t parse_key(sds_t *key, char **ptr)
+static off_t parse_key(struct slice *key, char **ptr)
 {
     key->len = *(size_t*)*ptr;
     *ptr += sizeof(key->len);
@@ -134,32 +131,32 @@ static off_t parse_value(struct value *value, char **ptr)
     return sizeof(value->size) + value->size;
 }
 
-static void load_concurrency_hash_insert(void *hs, const char *key, size_t keylen, struct value *value)
+static void load_concurrency_hash_insert(void *hs, struct slice *key, struct value *value)
 {
-    concurrency_hash_insert((concurrency_hash_t*)hs, key, keylen, value);
+    concurrency_hash_insert((concurrency_hash_t*)hs, key, value);
 }
 
-static void load_concurrency_hash_erase(void *hs, const char *key, size_t keylen)
+static void load_concurrency_hash_erase(void *hs, struct slice *key)
 {
-    concurrency_hash_erase((concurrency_hash_t*)hs, key, keylen);
+    concurrency_hash_erase((concurrency_hash_t*)hs, key);
 }
 
-static void load_hash_insert(void *hs, const char *key, size_t keylen, struct value *value)
+static void load_hash_insert(void *hs, struct slice *key, struct value *value)
 {
-    hash_insert((hash_t*)hs, key, keylen, value);
+    hash_insert((hash_t*)hs, key, value);
 }
 
-static void load_hash_erase(void *hs, const char *key, size_t keylen)
+static void load_hash_erase(void *hs, struct slice *key)
 {
-    hash_erase((hash_t*)hs, key, keylen);
+    hash_erase((hash_t*)hs, key);
 }
 
 static void load_segment(struct log_segment *seg,
-                         void (*insert)(void *hs, const char *key, size_t keylen, struct value *value),
-                         void (*erase)(void *hs, const char *key, size_t keylen),
+                         void (*insert)(void *hs, struct slice *key, struct value *value),
+                         void (*erase)(void *hs, struct slice *key),
                          void *arg)
 {
-    sds_t key;
+    struct slice key;
     struct value value;
     value.seg = seg;
     off_t lsn = 0;
@@ -175,10 +172,10 @@ static void load_segment(struct log_segment *seg,
         case Insert:
             lsn += parse_value(&value, &ptr);
             value.off = lsn - value.size;
-            insert(arg, key.buf, key.len, &value);
+            insert(arg, &key, &value);
             break;
         case Delete:
-            erase(arg, key.buf, key.len);
+            erase(arg, &key);
             break;
         }
     }
@@ -200,56 +197,43 @@ static void replay(log_t *log)
 struct compact_info {
     /* Compact range [begin, end] */
     struct log_segment *begin, *end;
-    struct log_segment *tmp;
+    struct log_segment *tmpseg;
+    struct writable_file *tmpfile;
     off_t   lsn;
     sds_t  *buf;
-    size_t  max_len;
     log_t  *log;
 };
 
-static off_t format_and_write(int fd, int type, struct kvpair *p)
+static sds_t *format(char type, struct slice *key, struct slice *val)
 {
-    int iovlen;
-    struct iovec iov[5];
-    iov[0].iov_base = (char*)&type;
-    iov[0].iov_len = 1;
-    iov[1].iov_base = &p->key.len;
-    iov[1].iov_len = sizeof(p->key.len);
-    iov[2].iov_base = (char*)p->key.buf;
-    iov[2].iov_len = p->key.len;
+    sds_t *s = sds_new();
+    size_t format_size = 1 + sizeof(key->len) + key->len;
+    if (type == Insert) format_size += sizeof(val->len) + val->len;
+    sds_reserve(s, format_size);
+    sds_append(s, &type, 1);
+    sds_append(s, (char*)&key->len, sizeof(key->len));
+    sds_append(s, key->buf, key->len);
     if (type == Insert) {
-        iov[3].iov_base = &p->value.len;
-        iov[3].iov_len = sizeof(p->value.len);
-        iov[4].iov_base = (char*)p->value.buf;
-        iov[4].iov_len = p->value.len;
-        iovlen = 5;
-    } else {
-        iovlen = 3;
+        sds_append(s, (char*)&val->len, sizeof(val->len));
+        sds_append(s, val->buf, val->len);
     }
-    if (writev(fd, iov, iovlen) < 0) {
-        db_err_sys("writev");
-    }
-    size_t len = 1 + sizeof(p->key.len) + p->key.len;
-    return type == Insert ? len + sizeof(p->value.len) + p->value.len : len;
+    return s;
 }
 
-static void do_compact(void *arg, sds_t *key, struct value *value)
+static void do_compact(void *arg, struct slice *key, struct value *value)
 {
     struct compact_info *info = (struct compact_info*)arg;
-    if (info->max_len < value->size) {
-        info->max_len = value->size;
-        sds_resize(info->buf, info->max_len);
-    }
-    info->buf->len = value->size;
     load_value(info->buf, value);
 
-    struct kvpair p;
-    kvpair_init(p, key->buf, key->len, info->buf->buf, info->buf->len);
-    info->lsn += format_and_write(info->tmp->fd, Insert, &p);
-    value->seg = info->tmp;
-    value->off = info->lsn - p.value.len;
-    assert(value->size == p.value.len);
-    concurrency_hash_insert(info->log->db->hs, key->buf, key->len, value);
+    struct slice val;
+    slice_init(val, info->buf->buf, info->buf->len);
+    sds_t *s = format(Insert, key, &val);
+    info->lsn += s->len;
+    writable_file_append(info->tmpfile, s->buf, s->len);
+    value->seg = info->tmpseg;
+    value->off = info->lsn - val.len;
+    assert(value->size == val.len);
+    concurrency_hash_insert(info->log->db->hs, key, value);
 }
 
 static void *compact(void *arg)
@@ -258,8 +242,9 @@ static void *compact(void *arg)
 
     char tmpfile[] = "tmp.XXXXX";
     mktemp(tmpfile);
-    info->tmp->fd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0644);
-    if (info->tmp->fd < 0) db_err_sys("open(%s)", tmpfile);
+    info->tmpfile = new_writable_file(tmpfile);
+    info->tmpseg = db_malloc(sizeof(struct log_segment));
+    info->buf = sds_new();
 
     /* Keep the latest versions of multiple same keys */
     hash_t *hs = hash_init();
@@ -274,8 +259,9 @@ static void *compact(void *arg)
     /* Write the result of compact to a new segment file */
     hash_for_each(hs, do_compact, (void*)info);
     char *new_segfile = get_segfile(log, info->end->segno);
-    info->tmp->segno = info->end->segno;
-    rename(tmpfile, new_segfile);
+    info->tmpseg->segno = info->end->segno;
+    rename(info->tmpfile->name, new_segfile);
+    writable_file_close(info->tmpfile);
     db_free(new_segfile);
 
     /* Delete all old segment files */
@@ -287,7 +273,7 @@ static void *compact(void *arg)
         db_free(old_segfile);
         seg = seg->next;
     }
-    replace_segment(log, info->end, info->tmp);
+    replace_segment(log, info->end, info->tmpseg);
     hash_free(hs);
     sds_free(info->buf);
     db_free(info);
@@ -303,8 +289,6 @@ static void maybe_compact(log_t *log)
         info->log = log;
         info->begin = log->base.next;
         info->end = log->cur;
-        info->tmp = db_malloc(sizeof(struct log_segment));
-        info->buf = sds_new();
         pthread_t tid;
         pthread_create(&tid, NULL, compact, (void*)info);
     }
@@ -314,10 +298,12 @@ log_t *log_init(DB *db)
 {
     log_t *log = (log_t*)db_malloc(sizeof(log_t));
     log->db = db;
+    pthread_mutex_init(&log->base_mtx, NULL);
+    pthread_mutex_init(&log->write_mtx, NULL);
     log->base.next = log->base.prev = &log->base;
     log->cur = NULL;
     log->segments = 0;
-    log->append_fd = -1;
+    log->curfile = NULL;
     replay(log);
     if (!log->cur) add_new_segment(log, 0);
     return log;
@@ -333,30 +319,50 @@ void log_dealloc(log_t *log)
         del_segment(log, seg);
         seg = tmp;
     }
-    close(log->append_fd);
+    writable_file_close(log->curfile);
+    pthread_mutex_destroy(&log->base_mtx);
+    pthread_mutex_destroy(&log->write_mtx);
 }
 
-void log_append(log_t *log, struct value *value, int sync, int type, struct kvpair *p)
+void log_append(log_t *log, struct value *value, int sync, char type, struct slice *key, struct slice *val)
 {
-    log->lsn += format_and_write(log->append_fd, type, p);
-    if (sync && sync_fd(log->append_fd)) {
-        db_err_sys("sync_fd(segno = %lld)", log->cur->segno);
-    }
+    sds_t *s = format(type, key, val);
+    pthread_mutex_lock(&log->write_mtx);
+    log->lsn += s->len;
+    writable_file_append(log->curfile, s->buf, s->len);
     if (value) {
         value->seg = log->cur;
-        value->off = log->lsn - p->value.len;
-        value->size = p->value.len;
+        value->off = log->lsn - val->len;
+        value->size = val->len;
     }
+    pthread_mutex_unlock(&log->write_mtx);
+
+    if (sync) writable_file_sync(log->curfile);
+
+    pthread_mutex_lock(&log->write_mtx);
     if (log->lsn >= max_segfile_size) {
         maybe_compact(log);
         add_new_segment(log, log->cur->segno + 1);
     }
+    pthread_mutex_unlock(&log->write_mtx);
+    sds_free(s);
 }
 
 void load_value(sds_t *query, struct value *value)
 {
     int fd = value->seg->fd;
     lseek(fd, value->off, SEEK_SET);
+    sds_resize(query, value->size);
     if (read(fd, query->buf, value->size) < 0)
-        db_err_sys("read(segno = %lld)", value->seg->segno);
+        db_error("read(segno = %lld): %s", value->seg->segno, strerror(errno));
+}
+
+char *concat(const char *s1, const char *s2)
+{
+    size_t l1 = strlen(s1);
+    size_t l2 = strlen(s2);
+    char *s = db_malloc(l1 + l2 + 1);
+    strcpy(s, s1);
+    strcpy(s + l1, s2);
+    return s;
 }

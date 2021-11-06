@@ -5,6 +5,7 @@
 
 #include "hash.h"
 
+/* Mutex must be initialized before use!!! */
 struct hash_segment {
     hash_t *hs;
     /* Consider using read-write lock */
@@ -18,9 +19,9 @@ typedef struct __concurrency_hash {
 } concurrency_hash_t;
 
 concurrency_hash_t *concurrency_hash_init(void);
-struct value concurrency_hash_find(concurrency_hash_t *hs, const char *key, size_t keylen);
-void    concurrency_hash_insert(concurrency_hash_t *hs, const char *key, size_t keylen, struct value *value);
-void    concurrency_hash_erase(concurrency_hash_t *hs, const char *key, size_t keylen);
+struct value concurrency_hash_find(concurrency_hash_t *hs, struct slice *key);
+void    concurrency_hash_insert(concurrency_hash_t *hs, struct slice *key, struct value *value);
+void    concurrency_hash_erase(concurrency_hash_t *hs, struct slice *key);
 void    concurrency_hash_free(concurrency_hash_t *hs);
 
 #endif /* _HIDB_CONCURRENCY_HASH_H */

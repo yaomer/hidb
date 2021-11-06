@@ -10,6 +10,7 @@ CHECK_SYMBOL_EXISTS(fdatasync "unistd.h" HAVE_FDATASYNC)
 CHECK_SYMBOL_EXISTS(F_FULLFSYNC "fcntl.h" HAVE_FULLFSYNC)
 
 set (SRC "${PROJECT_SOURCE_DIR}/src")
+set (PUBLIC_HEADER_DIR "${PROJECT_SOURCE_DIR}/include")
 
 configure_file (
     "${SRC}/config.h.in"
@@ -21,15 +22,14 @@ set (DB
     ${SRC}/sds.c
     ${SRC}/hash.c
     ${SRC}/concurrency_hash.c
-    ${SRC}/db.c
+    ${SRC}/db_impl.c
     ${SRC}/log.c
-    ${SRC}/sync.c
-    ${SRC}/error.c
+    ${SRC}/file.c
 )
 
 set (HEADERS
-    ${SRC}/db.h
-    ${SRC}/sds.h
+    ${PUBLIC_HEADER_DIR}/db.h
+    ${PUBLIC_HEADER_DIR}/sds.h
 )
 
 add_library (hidb STATIC ${DB})

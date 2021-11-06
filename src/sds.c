@@ -2,13 +2,14 @@
 #include <string.h>
 
 #include "alloc.h"
-#include "sds.h"
+#include "../include/sds.h"
 
 sds_t *sds_new()
 {
     sds_t *s = db_malloc(sizeof(sds_t));
-    s->buf = NULL;
+    s->buf = db_malloc(0);
     s->len = 0;
+    s->avail = 0;
     return s;
 }
 
@@ -22,6 +23,7 @@ void sds_init(sds_t *s)
 {
     s->buf = NULL;
     s->len = 0;
+    s->avail = 0;
 }
 
 void sds_clear(sds_t *s)
@@ -29,39 +31,40 @@ void sds_clear(sds_t *s)
     db_free(s->buf);
 }
 
+static void sds_growth(sds_t *s, size_t fit_size)
+{
+    static const int incr_factor = 2;
+    size_t size = s->len + s->avail;
+    if (size == 0) size = 2;
+    size_t n = size * incr_factor;
+    while (n < fit_size) n *= incr_factor;
+    s->buf = db_realloc(s->buf, n);
+    s->avail = n - s->len;
+}
+
 void sds_resize(sds_t *s, size_t size)
 {
-    s->buf = db_realloc(s->buf, size);
+    if (size > s->len + s->avail) {
+        sds_growth(s, size);
+    }
+    s->avail = (s->len + s->avail) - size;
     s->len = size;
 }
 
-sds_t *sds_dup(const char *s)
+void sds_reserve(sds_t *s, size_t size)
 {
-    return sds_dup2(s, strlen(s));
+    if (size <= s->avail) return;
+    sds_growth(s, s->len + size);
 }
 
-sds_t *sds_dup2(const char *s, size_t len)
+void sds_append(sds_t *sds, const char *s, size_t len)
 {
-    sds_t *sds = sds_new();
-    sds_append2(sds, s, len);
-    return sds;
-}
-
-sds_t *sds_dup3(sds_t *sds)
-{
-    return sds_dup2(sds->buf, sds->len);
-}
-
-void sds_append(sds_t *sds, const char *s)
-{
-    sds_append2(sds, s, strlen(s));
-}
-
-void sds_append2(sds_t *sds, const char *s, size_t len)
-{
-    sds->buf = db_realloc(sds->buf, sds->len + len);
+    if (len > sds->avail) {
+        sds_growth(sds, sds->len + len);
+    }
     memcpy(sds->buf + sds->len, s, len);
     sds->len += len;
+    sds->avail -= len;
 }
 
 int sds_cmp(sds_t *s1, sds_t *s2)
@@ -73,25 +76,16 @@ int sds_cmp(sds_t *s1, sds_t *s2)
 
 const char *sds2str(sds_t *s)
 {
-    sds_append2(s, "\0", 1);
+    sds_append(s, "\0", 1);
     s->len -= 1;
     return s->buf;
 }
 
-size_t sds_hash(sds_t *s)
+size_t strhash(const char *s, size_t len)
 {
     size_t hv = 0;
-    for (int i = 0; i < s->len; i++) {
-        hv = hv * 31 + s->buf[i];
+    for (size_t i = 0; i < len; i++) {
+        hv = hv * 31 + s[i];
     }
     return hv;
-}
-
-char *concat(const char *s1, const char *s2)
-{
-    size_t len1 = strlen(s1), len2 = strlen(s2);
-    char *s = db_malloc(len1 + len2 + 1);
-    strcpy(s, s1);
-    strcpy(s + len1, s2);
-    return s;
 }

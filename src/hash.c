@@ -3,7 +3,6 @@
 #include <assert.h>
 
 #include "alloc.h"
-#include "sds.h"
 #include "hash.h"
 #include "log.h"
 
@@ -28,11 +27,12 @@ static void __free_buckets(struct hash_node **buckets)
     db_free(buckets);
 }
 
-static struct hash_node *__alloc_node(const char *key, size_t keylen, struct value *value)
+static struct hash_node *__alloc_node(struct slice *key, struct value *value)
 {
     struct hash_node *node = db_malloc(sizeof(struct hash_node));
-    sds_init(&node->key);
-    sds_append2(&node->key, key, keylen);
+    node->key.buf = db_malloc(key->len);
+    memcpy(node->key.buf, key->buf, key->len);
+    node->key.len = key->len;
     node->value = *value;
     node->next = NULL;
     return node;
@@ -40,13 +40,18 @@ static struct hash_node *__alloc_node(const char *key, size_t keylen, struct val
 
 static void __free_node(struct hash_node *node)
 {
-    sds_clear(&node->key);
+    db_free(node->key.buf);
     db_free(node);
 }
 
-static size_t __hash(hash_t *hs, sds_t *key)
+static size_t __hash(hash_t *hs, struct slice *key)
 {
-    return sds_hash(key) & (hs->bucket_size - 1);
+    return strhash(key->buf, key->len) & (hs->bucket_size - 1);
+}
+
+static int __equal(struct slice *k1, struct slice *k2)
+{
+    return k1->len == k2->len && memcmp(k1->buf, k2->buf, k2->len) == 0;
 }
 
 #define __for_each(buckets, bucket_size, deal) \
@@ -54,22 +59,19 @@ static size_t __hash(hash_t *hs, sds_t *key)
         for (size_t i = 0; i < (bucket_size); i++) { \
             struct hash_node *node = buckets[i]; \
             while (node) { \
-                struct hash_node *tmp = node->next; \
+                struct hash_node *next = node->next; \
                 deal; \
-                node = tmp; \
+                node = next; \
             } \
         } \
     } while (0)
 
-static struct hash_node *__hash_find(hash_t *hs, const char *key, size_t keylen)
+static struct hash_node *__hash_find(hash_t *hs, struct slice *key)
 {
-    sds_t sdskey;
-    sdskey.buf = (char*)key;
-    sdskey.len = keylen;
-    size_t hashval = __hash(hs, &sdskey);
+    size_t hashval = __hash(hs, key);
     struct hash_node *node = hs->buckets[hashval];
     for ( ; node; node = node->next)
-        if (sds_cmp(&node->key, &sdskey) == 0)
+        if (__equal(&node->key, key))
             return node;
     return NULL;
 }
@@ -124,41 +126,37 @@ hash_t *hash_init(void)
     return hs;
 }
 
-struct value *hash_find(hash_t *hs, const char *key, size_t keylen)
+struct value *hash_find(hash_t *hs, struct slice *key)
 {
     __check_hash(hs);
-    struct hash_node *node = __hash_find(hs, key, keylen);
+    struct hash_node *node = __hash_find(hs, key);
     return node ? &node->value : NULL;
 }
 
-void hash_insert(hash_t *hs, const char *key, size_t keylen, struct value *value)
+void hash_insert(hash_t *hs, struct slice *key, struct value *value)
 {
     __check_hash(hs);
-    struct hash_node *node = __hash_find(hs, key, keylen);
+    struct hash_node *node = __hash_find(hs, key);
     if (node) {
         if (node->value.seg->segno <= value->seg->segno) {
             node->value = *value;
         }
         return;
     }
-    node = __alloc_node(key, keylen, value);
+    node = __alloc_node(key, value);
     __hash_insert(hs, node);
     __hash_expand(hs);
 }
 
-void hash_erase(hash_t *hs, const char *key, size_t keylen)
+void hash_erase(hash_t *hs, struct slice *key)
 {
     __check_hash(hs);
-    sds_t sdskey;
-    sdskey.buf = (char*)key;
-    sdskey.len = keylen;
-    size_t hashval = __hash(hs, &sdskey);
+    size_t hashval = __hash(hs, key);
     struct hash_node *node = hs->buckets[hashval];
     struct hash_node *pre = NULL;
 
     for ( ; node; node = node->next) {
-        if (sds_cmp(&node->key, &sdskey) == 0)
-            break;
+        if (__equal(&node->key, key)) break;
         pre = node;
     }
     if (!node) return;
@@ -171,7 +169,7 @@ void hash_erase(hash_t *hs, const char *key, size_t keylen)
     __hash_shrink(hs);
 }
 
-void hash_for_each(hash_t *hs, void (*deal)(void *arg, sds_t *key, struct value *value), void *arg)
+void hash_for_each(hash_t *hs, void (*deal)(void *arg, struct slice *key, struct value *value), void *arg)
 {
     __for_each(hs->buckets, hs->bucket_size, deal(arg, &node->key, &node->value));
 }
