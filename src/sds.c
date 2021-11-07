@@ -53,15 +53,14 @@ void sds_resize(sds_t *s, size_t size)
 
 void sds_reserve(sds_t *s, size_t size)
 {
-    if (size <= s->avail) return;
-    sds_growth(s, s->len + size);
+    if (size > s->avail) {
+        sds_growth(s, s->len + size);
+    }
 }
 
 void sds_append(sds_t *sds, const char *s, size_t len)
 {
-    if (len > sds->avail) {
-        sds_growth(sds, sds->len + len);
-    }
+    sds_reserve(sds, len);
     memcpy(sds->buf + sds->len, s, len);
     sds->len += len;
     sds->avail -= len;
@@ -76,8 +75,8 @@ int sds_cmp(sds_t *s1, sds_t *s2)
 
 const char *sds2str(sds_t *s)
 {
-    sds_append(s, "\0", 1);
-    s->len -= 1;
+    sds_reserve(s, 1);
+    s->buf[s->len] = '\0';
     return s->buf;
 }
 

@@ -3,10 +3,16 @@
 
 #include <sys/types.h>
 
+/*
+ * +-----------+
+ * | hello | 3 |
+ * +-----------+
+ * (len = 5, avail = 3)
+ */
 struct sds {
     char *buf;
-    size_t len;
-    size_t avail;
+    size_t len; /* the length of the buf */
+    size_t avail; /* the amount of space left available */
 };
 
 typedef struct sds sds_t;
@@ -22,8 +28,12 @@ void   sds_resize(sds_t *s, size_t size);
 /* set sds.avail >= size */
 void   sds_reserve(sds_t *s, size_t size);
 void   sds_append(sds_t *sds, const char *s, size_t len);
+/* Binary byte by byte comparison */
 int    sds_cmp(sds_t *s1, sds_t *s2);
 
+/* Return a C-style str.
+ * Notes that sds.len does not contain trailing '\0'.
+ */
 const char *sds2str(sds_t *s);
 
 size_t  strhash(const char *s, size_t len);
