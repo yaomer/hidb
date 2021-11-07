@@ -3,6 +3,7 @@
 
 #include "log.h"
 #include "concurrency_hash.h"
+#include "../include/db.h"
 
 typedef struct __db {
     char    *name;  /* db dir name */

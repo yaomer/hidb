@@ -201,12 +201,12 @@ struct compact_info {
     struct writable_file *tmpfile;
     off_t   lsn;
     sds_t  *buf;
+    sds_t  *codec;
     log_t  *log;
 };
 
-static sds_t *format(char type, struct slice *key, struct slice *val)
+static void format(sds_t *s, char type, struct slice *key, struct slice *val)
 {
-    sds_t *s = sds_new();
     size_t format_size = 1 + sizeof(key->len) + key->len;
     if (type == Insert) format_size += sizeof(val->len) + val->len;
     sds_reserve(s, format_size);
@@ -217,7 +217,6 @@ static sds_t *format(char type, struct slice *key, struct slice *val)
         sds_append(s, (char*)&val->len, sizeof(val->len));
         sds_append(s, val->buf, val->len);
     }
-    return s;
 }
 
 static void do_compact(void *arg, struct slice *key, struct value *value)
@@ -227,9 +226,10 @@ static void do_compact(void *arg, struct slice *key, struct value *value)
 
     struct slice val;
     slice_init(val, info->buf->buf, info->buf->len);
-    sds_t *s = format(Insert, key, &val);
-    info->lsn += s->len;
-    writable_file_append(info->tmpfile, s->buf, s->len);
+    sds_resize(info->codec, 0);
+    format(info->codec, Insert, key, &val);
+    info->lsn += info->codec->len;
+    writable_file_append(info->tmpfile, info->codec->buf, info->codec->len);
     value->seg = info->tmpseg;
     value->off = info->lsn - val.len;
     assert(value->size == val.len);
@@ -245,6 +245,7 @@ static void *compact(void *arg)
     info->tmpfile = new_writable_file(tmpfile);
     info->tmpseg = db_malloc(sizeof(struct log_segment));
     info->buf = sds_new();
+    info->codec = sds_new();
 
     /* Keep the latest versions of multiple same keys */
     hash_t *hs = hash_init();
@@ -276,6 +277,7 @@ static void *compact(void *arg)
     replace_segment(log, info->end, info->tmpseg);
     hash_free(hs);
     sds_free(info->buf);
+    sds_free(info->codec);
     db_free(info);
     atomic_flag_clear(&log->compacting);
     return NULL;
@@ -326,26 +328,31 @@ void log_dealloc(log_t *log)
 
 void log_append(log_t *log, struct value *value, int sync, char type, struct slice *key, struct slice *val)
 {
-    sds_t *s = format(type, key, val);
+    static _Thread_local sds_t *codec = NULL;
+
+    if (!codec) codec = sds_new();
+
+    sds_resize(codec, 0);
+    format(codec, type, key, val);
+
     pthread_mutex_lock(&log->write_mtx);
-    log->lsn += s->len;
-    writable_file_append(log->curfile, s->buf, s->len);
+
+    log->lsn += codec->len;
+    writable_file_append(log->curfile, codec->buf, codec->len);
+
     if (value) {
         value->seg = log->cur;
         value->off = log->lsn - val->len;
         value->size = val->len;
     }
-    pthread_mutex_unlock(&log->write_mtx);
 
     if (sync) writable_file_sync(log->curfile);
 
-    pthread_mutex_lock(&log->write_mtx);
     if (log->lsn >= max_segfile_size) {
         maybe_compact(log);
         add_new_segment(log, log->cur->segno + 1);
     }
     pthread_mutex_unlock(&log->write_mtx);
-    sds_free(s);
 }
 
 void load_value(sds_t *query, struct value *value)
@@ -365,4 +372,67 @@ char *concat(const char *s1, const char *s2)
     strcpy(s, s1);
     strcpy(s + l1, s2);
     return s;
+}
+
+void write_batch_init(struct write_batch *batch)
+{
+    sds_init(&batch->buf);
+}
+
+void write_batch_insert(struct write_batch *batch, struct slice *key, struct slice *value)
+{
+    format(&batch->buf, Insert, key, value);
+}
+
+void write_batch_delete(struct write_batch *batch, struct slice *key)
+{
+    format(&batch->buf, Delete, key, NULL);
+}
+
+void write_batch_iterate(log_t *log, int sync, struct write_batch *batch)
+{
+    struct slice key;
+    struct value value;
+    char *buf = batch->buf.buf;
+    size_t len = batch->buf.len;
+
+    pthread_mutex_lock(&log->write_mtx);
+
+    value.seg = log->cur;
+    off_t lsn = log->lsn;
+    log->lsn += len;
+    writable_file_append(log->curfile, buf, len);
+
+    if (sync) writable_file_sync(log->curfile);
+
+    if (log->lsn >= max_segfile_size) {
+        maybe_compact(log);
+        add_new_segment(log, log->cur->segno + 1);
+    }
+
+    pthread_mutex_unlock(&log->write_mtx);
+
+    /* What happens if compact is triggered when I update db->hs ? */
+    char *ptr = buf;
+    char *end = buf + len;
+    while (ptr < end) {
+        char type = *ptr++;
+        lsn++;
+        lsn += parse_key(&key, &ptr);
+        switch (type) {
+        case Insert:
+            lsn += parse_value(&value, &ptr);
+            value.off = lsn - value.size;
+            concurrency_hash_insert(log->db->hs, &key, &value);
+            break;
+        case Delete:
+            concurrency_hash_erase(log->db->hs, &key);
+            break;
+        }
+    }
+}
+
+void write_batch_clear(struct write_batch *batch)
+{
+    sds_clear(&batch->buf);
 }

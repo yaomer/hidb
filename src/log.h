@@ -13,6 +13,7 @@ typedef struct __db DB;
 
 struct slice;
 struct value;
+struct write_batch;
 
 enum log_op_type {
     Insert = 1,
@@ -57,6 +58,8 @@ void    log_dealloc(log_t *log);
 void    log_append(log_t *log, struct value *value, int sync, char type,
                    struct slice *key, struct slice *val);
 void    load_value(sds_t *query, struct value *value);
+
+void    write_batch_iterate(log_t *log, int sync, struct write_batch *batch);
 
 char   *concat(const char *s1, const char *s2);
 

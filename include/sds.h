@@ -17,7 +17,9 @@ void   sds_free(sds_t *s);
 void   sds_init(sds_t *s);
 void   sds_clear(sds_t *s);
 
+/* set sds.len = size, don't clear mem */
 void   sds_resize(sds_t *s, size_t size);
+/* set sds.avail >= size */
 void   sds_reserve(sds_t *s, size_t size);
 void   sds_append(sds_t *sds, const char *s, size_t len);
 int    sds_cmp(sds_t *s1, sds_t *s2);

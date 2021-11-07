@@ -1,10 +1,10 @@
-#include "db_impl.h"
-#include "alloc.h"
-#include "error.h"
-
 #include <string.h>
 #include <assert.h>
 #include <sys/stat.h>
+
+#include "db_impl.h"
+#include "alloc.h"
+#include "error.h"
 
 DB *db_open(const char *name)
 {
@@ -41,6 +41,12 @@ void db_delete(DB *db, int sync, struct slice *key)
 {
     log_append(db->log, NULL, sync, Delete, key, NULL);
     concurrency_hash_erase(db->hs, key);
+}
+
+void db_write(DB *db, int sync, struct write_batch *batch)
+{
+    write_batch_iterate(db->log, sync, batch);
+    sds_resize(&batch->buf, 0);
 }
 
 void db_close(DB *db)

@@ -7,7 +7,7 @@
 sds_t *sds_new()
 {
     sds_t *s = db_malloc(sizeof(sds_t));
-    s->buf = db_malloc(0);
+    s->buf = NULL;
     s->len = 0;
     s->avail = 0;
     return s;
